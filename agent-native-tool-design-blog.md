@@ -1,54 +1,55 @@
 # 给 AI Agent 造锤子：复杂系统的 Tool 设计框架
 
-> 一个外卖系统、一架无人机、一条产线——它们向 AI Agent 开放能力时，面临的是同一道题。
+> 一台智能巡检设备、一条产线、一个外卖系统——它们向 AI Agent 开放能力时，面临的是同一道题。
 
 ---
 
 ## 引子：当复杂系统对 AI Agent 开放时
 
-任何复杂系统——无人机、外卖平台、产线控制系统、金融交易引擎——在设计之初，它的能力都是通过 API 对外暴露的。这些 API 的设计默认了一个前提：**调用者是人。** 人类开发者读文档、理解参数、处理返回值、写 try-catch、调试。人有常识。人会猜。人能查 StackOverflow。
+任何复杂系统——智能巡检设备、外卖平台、产线控制系统、金融交易引擎——在设计之初，它的能力都是通过 API 对外暴露的。这些 API 的设计默认了一个前提：**调用者是人。** 人类开发者读文档、理解参数、处理返回值、写 try-catch、调试。人有常识。人会猜。人能查 StackOverflow。
 
-但当调用者从人变成 AI Agent，这套 API 就不够用了。不是因为 Agent 不够聪明——而是因为 Agent 和人类调用系统的方式有本质差异：
+但当调用者从人变成 AI Agent，这套 API 就不够用了。不是 Agent 不够聪明，而是它调用系统的方式和人不一样：
 
 - **人类靠经验填补接口的漏洞。** 文档没写的边界情况，人类会凭常识兜底。Agent 不会——你给它什么，它就信什么。漏一个状态，它就缺一个分支。
-- **人类能忍受模糊的返回值。** `{ status: "failed" }` 不足以写程序，但人类会去翻日志、查上下文、试着重试。Agent 拿到这个只会随机选一个处理方式。
+- **人类能忍受模糊的返回值。** `{ status: "failed" }` 不足以写程序，但人类会去翻日志、查上下文、试着重试。Agent 拿到这个，很难稳定选对下一步。
 - **人类能理解隐式约束。** "这两个接口不能同时调"——人看一眼就懂。Agent 需要它被显式写出来。
 
 这些差异带来的不是"API 好不好用"的问题，而是**系统能不能被 Agent 安全、可靠地编排**的问题。
 
-这不是一个系统独有。无人机需要 Agent 编排巡逻-识别-取证-返航。外卖平台需要 Agent 编排下单-支付-分仓-配送。产线需要 Agent 编排排产-投料-加工-质检。金融系统需要 Agent 编排核验-风控-放款。**底层各不相同，但暴露出来的问题是同一套**：状态怎么建模？失败怎么表达？安全边界谁来兜底？调用方需要知道多少底层细节？
+这不是一个系统独有。智能巡检设备需要 Agent 编排巡检-识别-取证-回到基站。外卖平台需要 Agent 编排下单-支付-分仓-配送。产线需要 Agent 编排排产-投料-加工-质检。金融系统需要 Agent 编排核验-风控-放款。**底层各不相同，但暴露出来的问题是同一套**：状态怎么建模？失败怎么表达？安全边界谁来兜底？调用方需要知道多少底层细节？
 
-这就是本文要回答的核心问题：
+这篇文章想回答的问题是：
 
-> **一个复杂系统如何为 AI Agent 重新编排它的能力接口——不是修修补补地增加文档，而是在架构层面重新决定 Agent 看到什么、不看到什么、每次调用之后能确认什么。**
+> **一个复杂系统如何为 AI Agent 重新设计能力接口：Agent 应该看到什么、不该看到什么、每次调用之后能确认什么。**
 
-以下内容将从可选路径对比、设计原则、具体 Tool 设计框架、常见反模式到验证方法，逐步展开。
+下面从三种可选路径讲起，再看 Tool 的设计原则、落地方法、常见反模式和验证方式。
 
 ---
 
-## 一、问题的本质：为什么 API 直接丢给 Agent 不行
+## 一、为什么 API 直接丢给 Agent 不行
 
 ### 1.1 旧方案的典型做法
 
-目前业界最普遍的做法是：**把所有 API 的 JSON Schema 和文档一股脑丢给大模型，让它自己理解、自己编排。**
+目前很常见的做法是：**把所有 API 的 JSON Schema 和文档都交给大模型，让它自己理解、自己编排。**
 
 ```
 tools = [
-  { name: "db_query",        params: { sql: "string" } },
-  { name: "inventory_lock",  params: { sku, qty } },
-  { name: "payment_charge",  params: { user_id, amount } },
-  { name: "warehouse_notify",params: { order_id, priority } },
-  { name: "sms_send",        params: { phone, text } },
-  { name: "cache_get",       params: { key } },
-  { name: "http_post",       params: { url, body } },
+  { name: "route_upload",    params: { waypoints } },
+  { name: "route_start",     params: { route_id } },
+  { name: "route_pause",     params: {} },
+  { name: "move_to",         params: { lat, lon, alt } },
+  { name: "sensor_aim",      params: { pitch, yaw, zoom } },
+  { name: "media_capture",   params: { mode } },
+  { name: "detect_objects",  params: { image } },
+  { name: "speaker_play",    params: { text } },
   // ... 还有几十个类似的
 ]
-system_prompt = "你是一个订单处理系统。用户下单了，完成整个流程。"
+system_prompt = "你是一个智能巡检设备控制系统。完成本次巡检任务。"
 ```
 
-Agent 需要自己把这些原子 API 串成：验证用户 → 锁定库存 → 扣款 → 通知仓库 → 发短信 → 更新状态。每一步出错还要自己处理库存回滚和退款。
+Agent 需要自己把这些原子 API 串成：上传路线 → 启动巡检 → 识别目标 → 暂停路线 → 移动到目标附近 → 调整观测模块 → 拍照取证 → 播报或闪灯 → 恢复路线 → 回到基站。每一步出错还要自己处理恢复路线、释放资源、跳过目标和安全收尾。
 
-这并不是电商独有的问题——换成无人机，API 列表变为 `move_to`、`gimbal_rotate`、`camera_capture`、`detect_objects`，Agent 同样需要自己串巡逻-识别-取证-返航。不管是服务端还是物理设备，一旦把实现细节原样喂给调用方，以上交互模式带来的麻烦是相通的。
+这并不是智能巡检设备独有的问题——换成电商系统，API 列表会变成 `inventory_lock`、`payment_charge`、`warehouse_notify`，Agent 同样需要自己串下单-支付-履约-通知。不管是服务端还是物理设备，一旦把实现细节原样喂给调用方，以上交互模式带来的麻烦是相通的。
 
 这个方案有三个互相独立的问题。每一个单独拿出来都可能让系统失败。
 
@@ -56,7 +57,7 @@ Agent 需要自己把这些原子 API 串成：验证用户 → 锁定库存 →
 
 ### 1.2 问题一：步骤数 n 指数级吞噬成功率
 
-每一步都有出错的可能。库存可能刚好在锁定前被抢走。支付网关可能超时。仓库系统可能返回异常。Agent 每多编排一个步骤，出错的概率就乘一次：
+每一步都有出错的可能。路线可能上传失败。观测模块可能正被另一个任务占用。目标可能在接近过程中丢失。拍照可能遇到存储空间不足。Agent 每多编排一个步骤，出错的概率就乘一次：
 
 ```
 总成功率 = P(步骤1) × P(步骤2) × P(步骤3) × ... × P(步骤n)
@@ -68,11 +69,11 @@ Agent 需要自己把这些原子 API 串成：验证用户 → 锁定库存 →
 0.99^50 ≈ 0.605   →  总成功率仅 60%
 ```
 
-如果每一步 95%（支付网关波动、库存缓存不一致时更真实的估计），30 步后直接跌到 21%。
+如果每一步 95%（链路波动、目标跟踪不稳定、传感器临时不可用时更真实的估计），30 步后直接跌到 21%。
 
-同样的公式放到无人机场景：每一步 99%，50 步后 60%；每一步 95%，30 步后 21%。**载体完全不同，数学规律完全一样。**
+同样的公式放到智能巡检设备场景：每一步 99%，50 步后 60%；每一步 95%，30 步后 21%。**载体完全不同，数学规律完全一样。**
 
-**步骤越多，成功率越趋近于零。这不是 prompt 优化能解决的——是 n 本身在杀人。**
+**步骤越多，整体成功率越低。这不是单靠 prompt 优化能解决的，问题出在步骤数本身。**
 
 ---
 
@@ -80,51 +81,59 @@ Agent 需要自己把这些原子 API 串成：验证用户 → 锁定库存 →
 
 概率公式只说了"会不会出错"。但还有一个同样致命但更隐蔽的问题：**原子 API 返回的原始数据，会占据大量上下文窗口，而且 Agent 必须自己从中提取有效信号。**
 
-以"判断某个商品今天卖了多少"为例。
+以"判断巡检画面里是否存在需要处理的静止目标"为例。
 
 **原子 API 的返回：**
 
 ```json
-db_query("SELECT * FROM order_items WHERE sku = 'PHONE-CASE-X' AND date = '2024-03-15'") →
+vision.read_raw_detections(area_id="A-03") →
 {
-  "rows": [
-    { "id": 48291, "order_id": 10382, "sku": "PHONE-CASE-X", "qty": 1, "price": 29.9,
-      "user_id": 421, "status": "paid", "warehouse": "WH-3",
-      "created_at": "2024-03-15T09:12:33Z" },
-    { "id": 48305, "order_id": 10394, "sku": "PHONE-CASE-X", "qty": 2, "price": 29.9,
-      "user_id": 187, "status": "paid", "warehouse": "WH-1", ... },
-    { "id": 48322, "order_id": 10401, "sku": "PHONE-CASE-X", "qty": 1, "price": 29.9,
-      "user_id": 503, "status": "cancelled", ... },
-    // ... 152 行
+  "frames": [
+    { "frame_id": 48291, "ts": 1710484353000,
+      "detections": [
+        { "class": "vehicle", "bbox": [0.42, 0.31, 0.18, 0.12],
+          "confidence": 0.87, "track_id": 3, "position": {"lat": 22.1, "lon": 113.9},
+          "velocity_m_s": 0.03 },
+        { "class": "person", "bbox": [0.61, 0.26, 0.06, 0.21],
+          "confidence": 0.65, "track_id": 9, "position": null,
+          "velocity_m_s": null }
+      ]
+    },
+    { "frame_id": 48292, "ts": 1710484353500, "detections": [ ... ] },
+    // ... 152 帧
   ]
 }
 ```
 
 Agent 拿到这个需要做什么？
-- 遍历 152 行，过滤 `status == "paid"`
-- 累加 `qty` 和 `price * qty`
-- 排除重复订单、测试用户、内部账号
-- 如果跨天查询，还要处理时区转换
+- 遍历 152 帧，过滤 `class == "vehicle"` 且置信度足够的目标
+- 按 `track_id` 或空间位置做跨帧去重
+- 判断目标是否连续静止超过阈值
+- 排除画面边缘、旧缓存、位置不可用的数据
+- 标记哪些目标可以驱动后续移动和取证
 
-**这些逻辑全部跑在 Agent 的上下文里。** 152 行原始数据，每一行的十多个字段——都在消耗 tokens。当 Agent 的上下文被原始数据占满，它用于做真正决策的空间就被挤走了。
+**这些逻辑全部跑在 Agent 的上下文里。** 152 帧原始数据，每个检测结果的十多个字段——都在消耗 tokens。当 Agent 的上下文被原始数据占满，它用于做真正决策的空间就被挤走了。
 
 **而一个被正确抽象的 Tool：**
 
 ```json
-order_stats.daily_sales("PHONE-CASE-X", "2024-03-15") →
+target_recognition.list_unprocessed(only_when="stationary_confirmed") →
 {
-  "sku": "PHONE-CASE-X",
-  "date": "2024-03-15",
-  "total_units": 89,
-  "total_revenue": 2661.10
+  "count": 2,
+  "targets": [
+    { "id": "T-003", "type": "vehicle", "stationary_duration_s": 73,
+      "position_quality": "rough", "can_drive_movement": true },
+    { "id": "T-007", "type": "vehicle", "stationary_duration_s": 91,
+      "position_quality": "rough", "can_drive_movement": true }
+  ]
 }
 ```
 
-Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Agent 不需要知道 152 行里每行的 `warehouse` 是什么。**Tool 用 4 行返回值，替代了 Agent 上下文里的 152 行原始数据和处理逻辑。**
+Tool 内部完成了检测→多帧确认→去重→静止判断→质量过滤→返回候选目标。Agent 不需要知道每一帧的 `bbox`、`confidence`、`track_id` 是什么。**Tool 用少量语义化目标，替代了 Agent 上下文里的 152 帧原始数据和处理逻辑。**
 
-同样的压缩发生在任何场景。无人机：车辆检测返回的检测框坐标、置信度、跨帧追踪，全部由 Tool 内部处理完，Agent 只拿到 `has_vehicle: true`。产线：PLC 传感器的时间序列数据由 Tool 内部聚合为"设备健康度：正常/亚健康/故障"。
+同样的压缩发生在任何场景。智能巡检设备：目标检测返回的检测框坐标、置信度、跨帧追踪，全部由 Tool 内部处理完，Agent 只拿到 `has_target: true`。产线：PLC 传感器的时间序列数据由 Tool 内部聚合为"设备健康度：正常/亚健康/故障"。
 
-这就是 Tool 抽象的核心价值之一：**信息压缩。** 把原始系统数据在 Tool 内部转化为 Agent 可以直接用于决策的语义信号。这个压缩过程不能被绕过——如果每个原子 API 都直接暴露，Agent 的上下文就是系统里最昂贵也最脆弱的通信带宽，而原始数据正在耗尽它。
+这就是 Tool 抽象的价值之一：**信息压缩。** 原始系统数据应该先在 Tool 内部变成 Agent 能直接使用的语义信号。否则，Agent 的上下文很快就会被原始数据塞满，真正用于决策的空间反而变少。
 
 ---
 
@@ -132,27 +141,28 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 原子 API 之间不是独立调用的——它们之间有隐式的依赖、时序和互斥关系：
 
-- "先锁库存，确认成功，才能扣款"——但 `inventory_lock` 和 `payment_charge` 是两个独立 API，没有任何东西阻止 Agent 先扣款再锁库存
-- "订单已取消时，不能再发货"——但 `warehouse_notify` 不会检查订单状态，Agent 可能对着已取消的订单通知仓库发货
-- "同一用户的支付操作需要幂等"——但作为两个独立的 `payment_charge` 调用，Agent 可能在网络超时后重试，导致重复扣款
+- "先暂停路线，确认暂停成功，才能接管移动控制"——但 `route_pause` 和 `move_to` 是两个独立 API，没有任何东西阻止 Agent 在路线仍运行时发移动指令
+- "观测模块未锁定时，拍照取证可能没有目标"——但 `sensor_aim` 和 `media_capture` 是两个独立 API，Agent 可能还没锁定就拍照
+- "同一目标处理需要幂等"——但作为两个独立的 `media_capture` 和 `speaker_play` 调用，Agent 可能在网络超时后重试，导致重复取证或重复播报
 
-人类开发者会凭经验感知到这些约束。"锁库存→扣款→发货"的顺序、幂等的要求、状态检查——人读过设计文档就懂了。Agent 不会——除非这些约束被显式地写在它看到的接口描述里。而原子 API 的 JSON Schema 不会写这些东西。
+人类开发者会凭经验感知到这些约束。"暂停路线→移动接近→锁定观测→取证→恢复路线"的顺序、幂等的要求、状态检查——人读过设计文档就懂了。Agent 不会——除非这些约束被显式地写在它看到的接口描述里。而原子 API 的 JSON Schema 不会写这些东西。
 
-同样的约束换到无人机：云台未锁定就拍照没意义、移动中拍照会模糊、电量不足时不该接受移动指令——同构的问题，不同的物理载体。
+同样的约束换到智能巡检设备：观测模块未锁定就拍照没意义，移动中拍照会模糊，电量不足时不该接受移动指令。载体不同，问题类似。
 
-> 典型的原子 API 编排脚本（电商版）：
+> 典型的原子 API 编排片段（智能巡检设备版）：
 >
 > ```
-> db_query("INSERT INTO orders ...")  →  返回 ok
-> payment_charge(user, 299)          →  超时，Agent 重试了一次
-> payment_charge(user, 299)          →  又返回 ok（重复扣款了，不知道）
-> inventory_lock(sku, 1)             →  返回 ok（但库存其实在上一步已经被别人抢走了）
-> warehouse_notify(order_id)         →  返回 ok
-> sms_send(phone, "发货啦")          →  返回 ok
-> // Agent 以为一切正常，实际上：重复扣款 + 超卖。客服电话已经打爆了。
+> route_pause()                       →  返回 ok
+> move_to(target_position)            →  超时，Agent 重试了一次
+> move_to(target_position)            →  又返回 ok（设备可能已经偏离原路线）
+> sensor_aim(target_id)               →  返回 ok（但目标已经丢失）
+> media_capture(mode="photo")         →  返回 ok（拍到的不是目标）
+> speaker_play("请立即驶离")           →  返回 ok
+> route_resume()                      →  返回 failed（断点已不可恢复）
+> // Agent 以为一切正常，实际上：取证错位 + 重复移动 + 路线无法恢复。
 > ```
 >
-> 每一个步骤都是"看起来成功"的独立动作，但整个流程的闭环从未闭合。Agent 收到的只是 6 个 `ok`，中间的重复扣款和超卖，它完全不知道。
+> 每一步单看都"成功"了，但整个流程并没有成功。Agent 收到的只是几个 `ok`，中间的目标丢失、重复移动和路线断点失效，它完全不知道。
 
 ---
 
@@ -160,7 +170,7 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 这三个问题——成功率的指数级衰减、原始数据侵占上下文、隐式约束的不可见——看似独立，但指向同一个根因：
 
-> **原子 API 把系统内部的复杂性原封不动地转嫁给了 Agent。Agent 被迫自己管理状态、自己压缩信息、自己推断约束。而 Agent 的上下文窗口和推理能力是系统里最昂贵、最稀缺的资源。**
+> **原子 API 把系统内部的复杂性转嫁给了 Agent。Agent 被迫自己管理状态、压缩信息、推断约束。**
 
 这不是 prompt 工程能解决的问题。这是接口设计层面的问题。
 
@@ -178,13 +188,13 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 **优点**：零适配成本。加新 API 就加一条 schema。
 
-**缺点**：第一章的三个问题一个都没解决。步骤数 n 依然在杀人，原始数据依然占满上下文，约束依然不可见。
+**缺点**：第一章的三个问题一个都没解决。步骤数仍然过多，原始数据仍然占满上下文，约束仍然不可见。
 
 **适用**：API 幂等、无状态依赖、容错性高的场景（查数据库、发消息、调 SaaS）。
 
 ### 路径 B：预定义工作流 + Agent 只填充参数
 
-**做法**：人预先定义完整的工作流模板。Agent 不参与编排，只在特定判断点介入（如"这张图里的车违停了吗"）。
+**做法**：人预先定义完整的工作流模板。Agent 不参与编排，只在特定判断点介入（如"这张图里的目标是否异常"）。
 
 **优点**：可靠性最高。不符合安全期望的动作不可能被编排出来。
 
@@ -192,7 +202,7 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 **适用**：场景固定、流程稳定、容错要求极低（产线、固定巡检路线）。
 
-### 路径 C：高阶有状态 Tool + Agent 自由编排（本文的方向）
+### 路径 C：高阶有状态 Tool + Agent 自由编排
 
 **做法**：系统暴露的不再是原子 API，而是高阶、有状态的 Tool。Tool 内部封装了状态机、信息压缩（原始数据→语义信号）、安全门和资源互斥。Agent 在 Tool 提供的能力边界内自由编排。
 
@@ -200,7 +210,7 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 **缺点**：Tool 设计投入最大。每个 Tool 都必须完整回答 6 个维度的问题（详见第四章）。
 
-**这条路不是因为它"最好"而被选中——而是它适配的场景最广：常规任务可以用路径 B 的工作流模板跑，全新任务也能用高层 Tool 让 Agent 从零编排出方案。**
+**这条路的优势在于适配面更广：常规任务可以用路径 B 的工作流模板跑，全新任务也能用高层 Tool 让 Agent 自己组合出方案。**
 
 ```
 三条路径对照：
@@ -219,11 +229,11 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 ### 适用场景迁移
 
-这个框架**不绑定无人机**。它适用于任何"Agent 需要编排一个带状态、资源、安全约束的复杂系统"的场景：
+这个框架**不绑定某一种设备载体**。它适用于任何"Agent 需要编排一个带状态、资源、安全约束的复杂系统"的场景：
 
 | 领域 | 典型场景 | Agent 编排什么 |
 |---|---|---|
-| 无人机/机器人 | 违停巡逻、电力巡检、安防巡逻 | 巡逻→识别→靠近→取证→处置→返航 |
+| 智能巡检设备/机器人 | 园区巡检、电力巡检、安防巡检 | 巡检→识别→靠近→取证→处置→回到基站 |
 | 微服务系统 | 订单履约、物流调度、退款流程 | 下单→支付→分仓→拣货→配送→签收 |
 | 工业自动化 | 产线排程、设备维护、质检流程 | 排产→投料→加工→质检→包装→入库 |
 | 金融系统 | 风控审核、批量结算、理赔处理 | 资料核验→风控评分→人工复审→放款 |
@@ -236,62 +246,63 @@ Tool 内部完成了查询→过滤→聚合→排除异常→返回摘要。Age
 
 ## 三、Tool 设计的核心原则
 
-### 元原则：职责分界——"这件事该归谁"
+### 总原则：职责分界——"这件事该归谁"
 
-Tool 设计的全部困难，归根结底是一个问题：**复杂系统中有那么多事——状态管理、安全校验、信息压缩、业务判断、流程编排——分别应该由谁负责？**
+Tool 设计首先要回答一个问题：**状态管理、安全校验、信息压缩、业务判断、流程编排，这些事分别该由谁负责？**
 
 答案是按"谁最有能力处理这件事"来分配，而不是按"谁方便"：
 
 | 复杂度类型 | 归谁 | 为什么 |
 |---|---|---|
 | 资源互斥、操作时序 | **Tool 内部**（Tool 开发者设计） | 确定性逻辑，让不可靠的调用方来管就是灾难 |
-| 原始数据→ 有语义的信号 | **Tool 内部** | Agent 的上下文是最昂贵的资源，不要随便给原始数据 |
-| 安全底线（风控、限额、幂等、认证） | **系统边界**（Runtime/框架强制执行） | 不能依赖任何人"记得检查" |
-| 业务判断（是否可疑、优先级、是否人工介入） | **Agent / 上层脚本 / 人** | 随场景变化，Tool 不该理解 |
-| 流程编排（先查库存再扣款还是先锁优惠券） | **Agent / 脚本** | 跨 Tool 的编排逻辑，Tool 不该知道 |
+| 原始数据→ 有语义的信号 | **Tool 内部** | 不要把 Agent 的上下文浪费在原始数据上 |
+| 安全底线（安全区域、电量阈值、资源互斥、幂等） | **系统边界 / Tool 内部**（框架或 Tool 契约强制执行） | 不能依赖任何人"记得检查" |
+| 业务判断（是否可疑、优先级、是否人工介入） | **Agent / 上层编排逻辑 / 人** | 随场景变化，Tool 不该理解 |
+| 流程编排（先巡检还是先处理告警、先取证还是先播报） | **Agent / 工作流 / 脚本 / 策略引擎** | 跨 Tool 的编排逻辑，Tool 不该知道 |
 | 环境状态（系统负载、当前并发数、降级开关） | **系统只读视图** | 服务于编排决策，但不触发动作 |
 
-> **一条总则：确定性逻辑下沉到 Tool，不确定性判断留给 Agent，安全底线由系统边界强制执行。搞反了任何一层，系统要么不可靠，要么不可复用。**
+> **一条总则：确定性逻辑下沉到 Tool，不确定性判断留给 Agent 或上层编排逻辑，安全底线由系统边界或 Tool 契约强制执行。层次放错了，系统要么不可靠，要么不可复用。**
 
-以下四条原则，是这条元原则在四个维度上的具体展开。
+下面四条原则，是这条总原则的展开。
 
 ---
 
 ### 原则 1：状态优先于动作
 
-**对应元原则中的**："状态机归 Tool 内部，不能归 Agent。"
+**对应总原则中的**："状态机归 Tool 内部，不能归 Agent。"
 
 ——
 
-当一个电商订单的状态是"已签收"，Agent 调了 `cancel()`。该不该让它取消？
+当一条巡检路线的状态是"已完成"，Agent 调了 `pause()`。该不该让它暂停？
 
-答案是：取决于当前状态。如果不定义状态机，Agent 就只能猜——"已签收"的订单调了取消，到底是拒绝、是走退货流程、还是静默忽略？
+答案是：取决于当前状态。如果不定义状态机，Agent 就只能猜——"已完成"的路线调了暂停，到底是拒绝、是重新进入运行状态、还是静默忽略？
 
-这就是"动作只是表象，状态才是系统真实约束"的意思。只列方法不定义状态，等于给 Agent 一把没有刻度的尺子。
+动作本身不够，状态才决定动作能不能做。只列方法不定义状态，Agent 就只能猜。
 
-**反例**：接口只写了 `order.cancel()` 这个方法名，没说不同状态下调用会怎样。Agent 在"配送中"状态下调了 `cancel`，结果系统抛了一个异常——Agent 没处理这个分支，整个流程卡死。
+**反例**：接口只写了 `route.pause()` 这个方法名，没说不同状态下调用会怎样。Agent 在"路线切换中"状态下调了 `pause`，结果系统抛了一个异常——Agent 没处理这个分支，整个流程卡死。
 
 **正例**：
 
 ```
-order.cancel() 的状态迁移：
+route.pause() / route.resume() 的状态迁移：
 
-pending_payment  → cancelled（直接取消，释放库存）
-confirmed        → cancelled（扣除优惠券返还）
-preparing        → cancelled（商家未备餐，可取消）
-delivering       → cancel_rejected（"骑手已在途中，取消需人工客服介入"）
-completed        → cancel_rejected（"已签收，请走退货流程"）
+idle        → pause_rejected（"当前没有运行中的路线"）
+running     → paused（暂停成功，释放路线控制权）
+pausing     → already_pausing（正在暂停，等待稳定状态）
+paused      → already_paused（已经暂停，可继续处理目标）
+completed   → already_completed（路线已完成，进入收尾）
+failed      → resume_rejected（路线失败，需回到基站或人工接管）
 ```
 
 Tool 的返回值不只是一个状态码，还告诉 Agent "接下来可以做什么"：
 
 ```json
-// cancel() 在 delivering 状态下返回：
-{ "status": "cancel_rejected", "reason": "rider_en_route",
-  "suggestion": "contact_customer_service" }
+// pause() 在 completed 状态下返回：
+{ "status": "already_completed", "reason": "route_finished",
+  "suggestion": "cleanup_and_return_to_base" }
 ```
 
-Agent 拿到这个就知道：不能重试，不能跳过，要把这个情况上报给人类客服。
+Agent 拿到这个就知道：不能重试暂停，也不该继续处理新目标，而是进入收尾流程。（电商里类似：订单已签收时不能直接取消，而应进入退货或人工处理流程。）
 
 > **原则：所有动作都必须绑定状态迁移。没有状态契约的动作接口是不完整的。**
 
@@ -299,7 +310,7 @@ Agent 拿到这个就知道：不能重试，不能跳过，要把这个情况�
 
 ### 原则 2：可预测接口
 
-**对应元原则中的**："Tool 和 Agent 之间的边界必须无意外。"
+**对应总原则中的**："Tool 和 Agent 之间的边界必须无意外。"
 
 ——
 
@@ -307,7 +318,7 @@ Agent 拿到这个就知道：不能重试，不能跳过，要把这个情况�
 
 因此 Tool 的接口必须满足：
 - 输入字段稳定，类型严格，单位明确
-- 合法范围明确（金额不能为负，数量不能超过库存）
+- 合法范围明确（高度不能越界，距离不能超过安全半径）
 - 输出状态可穷举（不是"成功 / 其他"）
 - 每个状态有稳定的 data 结构
 - 错误不靠隐式 exception 表达
@@ -316,26 +327,26 @@ Agent 拿到这个就知道：不能重试，不能跳过，要把这个情况�
 **反例**：
 
 ```json
-payment_charge(user_id, 299) →
+move_to(target_position) →
 { "status": "failed", "message": "Something went wrong" }
 ```
 
-Agent 不知道是余额不足、是银行卡过期、还是网关超时。三种情况的处理方式完全不同，但 Agent 只拿到一个 `failed`，它只能随机选——大概率选错。
+Agent 不知道是目标位置越界、避障传感器降级、路线控制权未释放，还是链路超时。四种情况的处理方式完全不同，但 Agent 只拿到一个 `failed`，很难选对。
 
 **正例**：
 
 ```json
-payment_charge(user_id, 299) →
+move_to(target_position) →
 {
-  "status": "declined",
-  "reason": "insufficient_funds",
+  "status": "rejected",
+  "reason": "out_of_safe_zone",
   "recoverable": false,
-  "suggestion": "notify_user_to_change_payment_method",
-  "system_state": "idle"
+  "suggestion": "skip_target_and_resume_route",
+  "system_state": "route_paused"
 }
 ```
 
-Agent 不需要猜——`recoverable: false` 告诉它不能重试，`suggestion` 告诉它下一步该通知用户换支付方式，`system_state: idle` 告诉它没有残留副作用。
+Agent 不需要猜——`recoverable: false` 告诉它不能重试，`suggestion` 告诉它下一步该跳过目标并恢复路线，`system_state: route_paused` 告诉它当前仍停在可恢复状态。（电商里类似：支付失败必须区分余额不足、卡过期、网关超时。）
 
 > **原则：接口的目标不是"容易调用"，而是"没有意外"。**
 
@@ -343,7 +354,7 @@ Agent 不需要猜——`recoverable: false` 告诉它不能重试，`suggestion
 
 ### 原则 3：信息压缩
 
-**对应元原则中的**："原始数据→语义信号归 Tool 内部，不穿过边界。"
+**对应总原则中的**："原始数据→语义信号归 Tool 内部，不穿过边界。"
 
 ——
 
@@ -351,47 +362,53 @@ Agent 不需要猜——`recoverable: false` 告诉它不能重试，`suggestion
 
 **Tool 的返回值应该是 Agent 可以直接用于决策的语义信号，而不是需要 Agent 二次处理的原始数据。**
 
-反例：`db_query("SELECT * FROM orders ...")` 返回 152 行原始数据。
+反例：`vision.read_raw_detections(...)` 返回 152 帧原始检测数据。
 
-正例：`order_stats.daily_sales(sku, date)` 返回 `{ total_units: 89, total_revenue: 2661.10 }`。
+正例：`target_recognition.list_unprocessed(only_when="stationary_confirmed")` 返回少量已验证候选目标。
 
 判断标准很简单：**Agent 拿到返回值之后，是直接可以写 if-else，还是需要先自己做一遍过滤、聚合、去重？** 如果是后者，这个 Tool 就没有完成信息压缩。
 
-> **原则：Agent 的上下文是最昂贵的带宽。原始数据不该穿过 Tool 边界。**
+> **原则：不要把原始数据直接扔过 Tool 边界。**
 
 ---
 
 ### 原则 4：安全第一
 
-**对应元原则中的**："安全底线归系统边界，不能依赖任何人记得检查。"
+**对应总原则中的**："安全底线归系统边界或 Tool 契约，不能依赖任何人记得检查。"
 
 ——
 
 Agent 有时候会给出超出安全边界的指令。这不一定是 Agent"错了"——可能是它缺少信息，可能是 prompt 没覆盖到这个边界，也可能是模型幻觉。
 
-无论原因是什么，系统的安全边界不能依赖 Agent 自觉。它必须是**在 Tool 框架/Runtime 层面强制执行的、Agent 无法绕过的硬约束**。
+无论原因是什么，系统的安全边界不能依赖 Agent 自觉。它必须是**在 Tool 框架、Runtime 或 Tool 内部契约中强制执行的、Agent 无法绕过的硬约束**。实现上可以是统一安全门，也可以是具体 Tool 在执行前拒绝；对 Agent 来说，关键是每个不安全请求都得到结构化的拒绝原因，而不是静默执行。
 
-**反例**：一笔订单金额超过用户单笔限额，Agent 不知道有这个限制，直接调了 `payment_charge`。支付服务执行了——因为文档写了"调用方应校验金额"，但 Agent 没读到那行。
+**反例**：目标位置超出安全区域，Agent 不知道有这个限制，直接调了 `move_to`。设备控制服务执行了——因为文档写了"调用方应校验区域"，但 Agent 没读到那行。
 
 **正例**：
 
 ```
-Agent 调用：payment_charge(user_id, 50000)
+Agent 调用：move_to(lat, lon, alt)
 
-Runtime 安全门自动执行（Agent 和 Tool 都感知不到这一层）：
-├── 风控检查 → 用户被标记为高风险 → 拒绝，返回 risk_rejected
-├── 单笔限额 → 50000 > 用户单笔上限 20000 → 拒绝，返回 amount_exceeds_limit
-├── 日累计限额 → 用户今日已消费 80000 > 日限额 50000 → 拒绝，返回 daily_limit_exceeded
-├── 幂等检查 → 同一笔订单已扣款 → 拒绝，返回 duplicate_charge_blocked
+安全约束自动执行（可以在 Runtime，也可以在 Tool 执行前）：
+├── 安全区域检查 → 目标点在安全区域外 → 拒绝，返回 out_of_safe_zone
+├── 高度 / 距离检查 → 请求超出设备能力边界 → 拒绝，返回 movement_limit_exceeded
+├── 电量检查 → 当前电量不足以完成动作并安全返回 → 拒绝，返回 low_power
+├── 资源互斥检查 → 路线控制权尚未释放 → 拒绝，返回 route_still_running
+├── 幂等检查 → 同一目标正在处理中 → 拒绝，返回 target_already_processing
 └── 全部通过 → 放行给 Tool 执行
 
 # Agent 拿到的拒绝结果是结构化的：
-{ "status": "rejected", "reason": "amount_exceeds_limit",
-  "limit": 20000, "requested": 50000,
-  "suggestion": "notify_user_reduce_amount_or_split_order" }
+{ "status": "rejected", "reason": "out_of_safe_zone",
+  "safe_zone_id": "A-03", "requested": {"lat": 22.1, "lon": 113.9, "alt": 18},
+  "suggestion": "skip_target_and_resume_route" }
 ```
 
-这些检查不是写在一个 Tool 的内部代码里，也不是依赖 prompt 里提醒 Agent。它们是一个独立的安全门层——Agent 无法跳过它，Tool 开发者不需要在每个 Tool 里重复实现它。
+这些检查不能依赖 prompt 里提醒 Agent，也不能依赖调用方"记得先校验"。它们可以被抽成独立安全门，也可以由相关 Tool 内部统一封装，但必须满足同一个对外契约：Agent 无法跳过；冲突时拒绝；拒绝结果可穷举、可处理。
+
+尤其要避免三种假安全：
+- **静默修正**：擅自把不合法参数改成合法值但不告诉 Agent。
+- **静默忽略**：返回成功但实际上没有执行。
+- **静默降级**：用看似成功的状态掩盖实际失败。
 
 > **原则：当 Agent 的指令和安全规则冲突时，以安全规则为准。Agent 可以请求，系统必须校验。不安全请求不能被穿透。**
 
@@ -400,7 +417,7 @@ Runtime 安全门自动执行（Agent 和 Tool 都感知不到这一层）：
 ### 四条原则的层次关系
 
 ```
-元原则：职责分界
+总原则：职责分界
     │
     ├── 原则 1：状态优先 ──→ 状态管理归谁
     ├── 原则 2：可预测接口 ──→ 边界契约怎么定
@@ -408,7 +425,7 @@ Runtime 安全门自动执行（Agent 和 Tool 都感知不到这一层）：
     └── 原则 4：安全第一 ──→ 什么绝对不能过边界
 ```
 
-四条原则各自回答一个独立问题，合在一起完整覆盖了"Tool 应该怎么设计"的核心逻辑：**谁来管状态、边界怎么定、数据怎么传、安全谁兜底。**
+四条原则合在一起，回答的是这几个问题：**谁来管状态、边界怎么定、数据怎么传、安全谁兜底。**
 
 ---
 
@@ -416,7 +433,7 @@ Runtime 安全门自动执行（Agent 和 Tool 都感知不到这一层）：
 
 第三章给了原则。这一章回答"怎么用"——不是拿着框架去套业务，而是从业务出发，反向推导出 Tool。
 
-以下用一个 IoT 设备为例：一个具备移动、观测、识别能力的智能巡检设备，需要通过 Agent 编排完成多种巡检任务。这个例子的本质——物理系统、状态、资源、安全——与你自己的系统是同构的。
+以下用一个 IoT 设备为例：一台具备移动、观测、识别能力的智能巡检设备，需要通过 Agent 编排完成多种巡检任务。它有物理状态、资源互斥和安全边界，这些问题在很多复杂系统里都会出现。
 
 ---
 
@@ -467,46 +484,52 @@ Runtime 安全门自动执行（Agent 和 Tool 都感知不到这一层）：
 
 ```
 原始能力池：
-  按路线移动、暂停、恢复、停止、移动到指定点、返回出发点、
+  按路线移动、暂停、恢复、停止、移动到指定点、回到基站、
   拍照、录像开始/停止、检测目标、锁定目标、持续追踪、
-  判断静止时长、多角度记录、接收告警、中断当前任务、恢复原任务
+  判断静止时长、标记目标已处理、接收告警、中断当前任务、恢复原任务
 
 归并后：
 
-  PatrolRouter        → 按路线移动、暂停、恢复、停止、导航到指定点、返回出发点
-                        （所有"去哪"的能力）
-  MediaRecorder       → 拍照、录像开始、录像停止
+  RoutePlanner        → 按路线执行、暂停、恢复、停止
+                        （路线生命周期）
+  MoveController      → 移动到指定点、相对目标偏移移动
+                        （一次性空间移动）
+  DeviceControl       → 启动、回到基站、急停
+                        （全局设备控制和最高优先级安全动作）
+  MediaStorage        → 拍照、录像开始、录像停止、媒体查询
                         （所有"记录什么"的能力）
-  ObjectDetector      → 检测目标、锁定目标、判断静止时长
-                        （所有"看到什么"的能力）
-  AlertResponder      → 接收告警、中断当前任务、导航到告警位置、恢复原任务
-                        （告警响应独占的能力，拆成独立 Tool）
+  TargetRecognition   → 检测目标、持续追踪、判断静止时长、查询目标、标记已处理
+                        （所有"看到什么、目标处于什么生命周期"的能力）
+  TargetObservation   → 锁定并观察指定目标
+                        （精确观测能力）
+  AlertResponder      → 接收告警、生成响应请求、记录告警处理状态
+                        （告警响应的事件入口和状态管理）
 ```
 
 **正交性检验**：
-- `PatrolRouter` 和 `ObjectDetector` 有重叠吗？→ 没有。一个管移动，一个管观测。
-- `MediaRecorder` 和 `ObjectDetector` 有重叠吗？→ 没有。一个管记录，一个管识别。
-- 未来加"定点持续监控"场景 → 需要什么？→ 不需要新 Tool，Agent 编排现有的 `PatrolRouter` + `ObjectDetector` + `MediaRecorder` 即可。
+- `RoutePlanner` 和 `MoveController` 有重叠吗？→ 没有。一个管路线生命周期，一个管单次空间移动。
+- `MediaStorage` 和 `TargetRecognition` 有重叠吗？→ 没有。一个管记录，一个管识别和目标生命周期。
+- 未来加"定点持续监控"场景 → 需要什么？→ 不需要新 Tool，Agent 编排现有的 `MoveController` + `TargetRecognition` + `TargetObservation` + `MediaStorage` 即可。
 
 **反面示范：一个错误的归并**
 
-假设设计者图省事，把"中断当前任务→导航到告警位置→恢复原任务"也塞进 `PatrolRouter`，理由是"都是移动相关的"：
+假设设计者图省事，把"中断当前任务→导航到告警位置→恢复原任务"也塞进 `RoutePlanner`，理由是"都是路线相关的"：
 
 ```
-PatrolRouter（错误版）：
-  按路线移动、暂停、恢复、停止、导航到指定点、返回出发点、
+RoutePlanner（错误版）：
+  按路线执行、暂停、恢复、停止、
   接收告警、中断当前任务、导航到告警位置、恢复原任务
   ← 把告警响应的逻辑也吞了
 ```
 
-这在当前三个场景下完全能跑通。问题出现在 4.4 的"多设备协同巡检"场景——两台设备分工，需要由一个协调器统一分配任务。告警来了该谁去？如果告警响应逻辑嵌在 `PatrolRouter` 里，协调器无法独立控制"谁去响应告警"——它只能调 `PatrolRouter` 的方法，而 `PatrolRouter` 同时也在管路线。协调逻辑被迫和移动逻辑耦合。
+这在当前三个场景下完全能跑通。问题出现在 4.4 的"多设备协同巡检"场景——两台设备分工，需要由一个协调器统一分配任务。告警来了该谁去？如果告警响应逻辑嵌在 `RoutePlanner` 里，协调器无法独立控制"谁去响应告警"——它只能调 `RoutePlanner` 的方法，而 `RoutePlanner` 同时也在管路线。协调逻辑被迫和路线逻辑耦合。
 
-正确的设计是：`AlertResponder` 独立为一个 Tool，协调器可以直接调 `AlertResponder.dispatch(device_id, alert)`。移动和告警响应互不污染。
+正确的设计是：`AlertResponder` 独立为一个 Tool，协调器可以直接调 `AlertResponder.dispatch(device_id, alert)`。告警入口、路线生命周期和单次移动互不污染。
 
 **归并的铁律**：如果两个能力在未来可能被不同的调用方独立控制，它们就不该在同一个 Tool 里。
 
 **原子 Tool 也是合理的**：
-- `ObjectDetector.has_target("vehicle")` → `true`。这就够了。Agent 不需要知道画面里检测框的坐标、置信度、跨帧追踪状态——那些全部封装在 Tool 内部。布尔值是业务需要的准确粒度。
+- `TargetRecognition.has_target("vehicle")` → `true`。这就够了。Agent 不需要知道画面里检测框的坐标、置信度、跨帧追踪状态——那些全部封装在 Tool 内部。布尔值是业务需要的准确粒度。
 
 ---
 
@@ -516,15 +539,15 @@ PatrolRouter（错误版）：
 
 ```
 假设新增"多设备协同巡检"场景（两台设备分工覆盖不同区域）：
-  - 需要改 PatrolRouter 吗？→ 不需要，每台设备各有一个 Router
-  - 需要改 ObjectDetector 吗？→ 可能需要新增参数 area_id 来标识检测区域
+  - 需要改 RoutePlanner 吗？→ 不需要，每台设备各有一个路线执行器
+  - 需要改 TargetRecognition 吗？→ 可能需要新增参数 area_id 来标识检测区域
   - 需要新增 Tool 吗？→ 需要一个 CoordinationManager 来管理任务分配
   - 现有 Tool 需要拆散重组吗？→ 不需要
 ```
 
-如果答案是"需要拆散 PatrolRouter 和 ObjectDetector 重新组合"——说明当前 Tool 粒度有问题。
+如果答案是"需要拆散 RoutePlanner 和 TargetRecognition 重新组合"——说明当前 Tool 粒度有问题。
 
-**理想状态：新增场景 = 现有 Tool 的参数扩展 + 少量新 Tool，不改现有 Tool 的核心契约。**
+**理想状态：新增场景 = 扩展参数 + 少量新 Tool，而不是推翻已有契约。**
 
 ---
 
@@ -532,12 +555,12 @@ PatrolRouter（错误版）：
 
 每个 Tool 逐一过四原则。这是第三章的落地。
 
-以 `PatrolRouter` 为例：
+以 `RoutePlanner` 为例：
 
 **原则 1（状态优先）— 状态机完整吗？**
 
 ```
-PatrolRouter 的状态迁移：
+RoutePlanner 的状态迁移：
 
 idle       ──start(route)──→  running
 running    ──pause()──────→  paused
@@ -556,14 +579,14 @@ completed 状态下 pause() → 返回 already_completed。
 **原则 2（可预测接口）— 返回值可直接写 if-else 吗？**
 
 ```json
-router.start(route_id) →
+route.start(route_id) →
 {
   "status": "running",
   "handle": { "route_id": "R-042", "current_waypoint": 3, "remaining": 15 },
   "on_status_change": "register_callback(event)"  // 事件流
 }
 
-router.pause() →
+route.pause() →
 {
   "status": "paused",
   "reason": null,
@@ -579,43 +602,44 @@ router.pause() →
 
 **原则 3（信息压缩）— 返回值是语义信号吗？**
 
-`PatrolRouter.status()` 返回 `{ "status": "running", "waypoint": "3/18" }`，而不是把电机转速、实时坐标轨迹、IMU 数据全部抛出来。Agent 需要的是"到哪了"，不是"每个轮子转多快"。
+`RoutePlanner.status()` 返回 `{ "status": "running", "waypoint": "3/18" }`，而不是把电机转速、实时坐标轨迹、IMU 数据全部抛出来。Agent 需要的是"路线执行到哪里了"，不是"每个轮子转多快"。
 
 **原则 4（安全第一）— 安全门在哪？**
 
 ```
-Runtime 安全门（PatrolRouter 感知不到，Agent 感知不到）：
+Runtime / Tool 安全门：
 ├── 设备电量 < 移动安全阈值 → 拒绝 start()，返回 low_power_abort
 ├── 设备当前正在执行另一条路线 → 拒绝 start()，返回 route_already_active
-├── 目标位置超出安全边界 → 拒绝 move_to()，返回 out_of_safe_zone
+├── 目标位置超出安全边界 → `MoveController.move_to()` 返回 out_of_safe_zone
 └── 通信链路中断 → 自动触发安全停止，系统状态 → aborted
 ```
 
 ---
 
-**再看 `ObjectDetector`——一个原子 Tool 的校验**：
+**再看 `TargetRecognition`——一个轻量 Tool 的校验**：
 
-与 `PatrolRouter` 不同，`ObjectDetector` 是轻量级 Tool。这不意味着它可以跳过原则校验——只意味着每个维度的答案更短。
+与 `RoutePlanner` 不同，`TargetRecognition` 是轻量级 Tool。这不意味着它可以跳过原则校验——只意味着每个维度的答案更短。
 
 **原则 1（状态优先）— 状态机，即使简单也必须定义：**
 
 ```
-ObjectDetector 的状态迁移：
+TargetRecognition 的状态迁移：
 
-idle    ──lock(target)──→  locked
-locked  ──unlock()─────→  idle
-locked  ──lost─────────→  idle  （目标丢失，自动解锁）
+stopped ──start(types)────────→ running
+running ──on_detect(callback)─→ running  （注册事件回调）
+running ──mark_processed(id)──→ running  （更新目标生命周期）
+running ──stop()──────────────→ stopped
 ```
 
-只有两个状态。但 `lock()` 在 `locked` 状态下调用的行为是明确的：返回 `already_locked` 并附带当前锁定目标的 ID。Agent 不需要猜"两个 lock 会发生什么"。
+状态不复杂，但每个动作的行为必须明确：`start()` 在 `running` 状态下返回 `already_running`；`mark_processed(id)` 只改变目标生命周期，不偷偷释放其他资源；`list_unprocessed()` 返回未处理目标列表。Agent 不需要靠自己的上下文记住"刚才处理过谁"。
 
 **原则 3（信息压缩）— 这是原子 Tool 最容易翻车的地方：**
 
-假设初版 `ObjectDetector` 的设计者偷了懒：
+假设初版 `TargetRecognition` 的设计者偷了懒：
 
 ```json
 // 初版（违反原则 3）
-detector.scan() →
+recognition.scan() →
 {
   "detections": [
     { "class": "vehicle", "bbox": [100,200,300,400], "confidence": 0.87, "track_id": 3 },
@@ -631,17 +655,18 @@ detector.scan() →
 修正后：
 
 ```json
-detector.has_target("vehicle") → true
-detector.count("vehicle") → { "count": 2, "ids": [3, 7] }
-detector.lock(3) → { "status": "locked", "id": 3, "stationary_sec": 12 }
+recognition.on_detect(callback, only_when="stationary_confirmed")
+recognition.has_target("vehicle") → true
+recognition.list_unprocessed() → { "count": 2, "ids": [3, 7] }
+recognition.mark_processed(3, result) → { "status": "ok" }
 ```
 
-每个返回值都是语义信号。Agent 不需要理解检测框坐标。
+每个返回值都是语义信号。Agent 不需要理解检测框坐标，也不需要自己维护目标去重表。
 
 **原则 4（安全第一）— 原子 Tool 也有安全门：**
 
 ```
-Runtime 安全门：
+Runtime / Tool 安全门：
 ├── 设备不在安全状态时 → 拒绝 scan()，返回 device_not_ready
 └── scan() 调用频率 > 上限 → 拒绝，返回 rate_limited，suggestion: wait_and_retry
 ```
@@ -657,12 +682,12 @@ Runtime 安全门：
 **场景 A（标准巡检）走查**：
 
 ```
-Agent 调用 PatrolRouter.start(route_a)
+Agent 调用 RoutePlanner.start(route_a)
   → 事件通知：waypoint_reached
-  → Agent 调 MediaRecorder.capture() 拍照留存
-  → ObjectDetector.has_target("vehicle") → false，继续
+  → Agent 调 MediaStorage.photo() 拍照留存
+  → TargetRecognition.has_target("vehicle") → false，继续
   → 循环直到 route complete
-  → PatrolRouter.return_to_base()
+  → DeviceControl.return_to_base()
 ```
 ✅ 跑通。
 
@@ -670,58 +695,60 @@ Agent 调用 PatrolRouter.start(route_a)
 
 ```
 Agent 收到事件：AlertResponder.on_alert(alert)
-  → PatrolRouter.pause() 暂停当前巡检
-  → AlertResponder.navigate_to(alert.location)
-  → ObjectDetector.scan() 扫描周围
-  → MediaRecorder.capture_multi_angle() 多角度记录
-  → AlertResponder.resume_previous() 恢复原巡检
+  → RoutePlanner.pause() 暂停当前巡检
+  → MoveController.move_to(alert.location)
+  → TargetRecognition.scan() 扫描周围
+  → MediaStorage.photo(tags=["alert", alert.id]) 记录现场
+  → RoutePlanner.resume() 恢复原巡检
 ```
-✅ 跑通。不需要改任何 Tool，编排层新增 AlertResponder 即可。
+✅ 跑通。不需要改任何已有 Tool，编排层新增 AlertResponder 即可。
 
 **场景 B（定点核查）走查——初版跑不通：**
 
-假设设计者在 4.3 归并时漏掉了"多角度记录"能力，`MediaRecorder` 只有 `capture()`（单张拍照）。走查场景 B：
+假设设计者在 4.3 归并时漏掉了"一次性移动"和"精确观测"的职责，把路线、移动、观测、拍摄都压进了一个大 Tool。走查场景 B：
 
 ```
-Agent 调用 PatrolRouter.move_to(target_location)
-  → ObjectDetector.lock(target_id)
-  → ObjectDetector 检测到目标静止 ≥ 60s，返回 stationary_confirmed
-  → Agent 需要"多角度留证"
-  → 调 MediaRecorder.capture() → 只有一张正面照
-  → 调 PatrolRouter.move_to(angle_2) → 再调 capture() → 侧面照
-  → 调 PatrolRouter.move_to(angle_3) → 再调 capture() → 背面照
+Agent 调用 MegaPatrol.inspect_target(target_id)
+  → 内部暂停路线
+  → 内部移动到目标附近
+  → 内部锁定目标
+  → 内部拍照
+  → 内部恢复路线
+  → 返回 { "status": "ok", "photos": [...] }
 ```
 
-❌ 跑是跑通了，但 Agent 被迫自己编排了三次移动+拍摄。每一步都可能出错，步骤数 n 又回来了（见 1.2）。而且 Agent 需要知道"从哪个角度拍"——这应该是 Tool 内部的知识，不应该让 Agent 管。
+❌ 跑是跑通了，但这个 Tool 把路线控制、移动、观测、媒体记录和恢复策略都焊在了一起。未来如果只想换取证角度、改恢复策略、或让告警响应复用"移动到目标"能力，都必须改这个大 Tool。
 
-**回退修正**：回到 4.2，在场景 B 下补充能力："从多个角度自动完成拍摄"。回到 4.3，把这项能力归入 `MediaRecorder`：
-
-```
-MediaRecorder（修正版）：
-  拍照、录像开始/停止、多角度自动拍摄
-```
+**回退修正**：回到 4.3，把能力拆回正交 Tool。多角度取证不是 `MediaStorage` 的内部职责，也不是某个固定实现的专属能力；它是上层编排逻辑可以组合出的一个子流程。这个上层可以是 Agent 实时规划、工作流引擎、生成脚本或人写控制逻辑。
 
 再次走查：
 
 ```
-Agent 调 MediaRecorder.capture_multi_angle(target_id, angles=[3])
-  → Tool 内部自动完成：移动到角度 1→拍→角度 2→拍→角度 3→拍
-  → 返回 { "status": "ok", "images": [img1, img2, img3] }
+Agent / 上层编排逻辑：
+  → TargetRecognition.on_detect(...) 收到 stationary_confirmed 目标
+  → RoutePlanner.pause()
+  → MoveController.move_to(target_location)
+  → TargetObservation.observe(target_id)
+  → MediaStorage.photo(tags=["evidence", target_id, "front"])
+  → 上层编排逻辑需要"多角度留证"
+  → MoveController.move_to(angle_2) → TargetObservation.observe(target_id) → MediaStorage.photo()
+  → MoveController.move_to(angle_3) → TargetObservation.observe(target_id) → MediaStorage.photo()
+  → RoutePlanner.resume()
 ```
 
-✅ 跑通。这个修正循环只用了 5 分钟——因为改的是 Tool 内部实现，Agent 的编排逻辑一行没动。**这就是职责分界的实际价值：修一个问题只碰一层。**
+✅ 跑通。每个 Tool 的职责仍然单一，复用边界清楚。多角度取证如果经常出现，可以在上层沉淀为一个可复用的 workflow / macro / generated routine，但不应塞进只负责媒体存储的 Tool 里。
 
 ---
 
-跑不通 → Tool 有缺口 → 回到 4.2 补能力、4.3 重归并。闭环后才算设计完成。
+跑不通 → Tool 有缺口 → 回到 4.2 补能力、4.3 重归并。能闭环，才算设计完成。
 
-本章的核心逻辑可以总结为一句话：**先看业务要什么，再把能力归并成正交的 Tool，用原则校验，用场景验证，修缺口，再验证——直到每个场景 Agent 都能只靠 Tool 跑通。** 接下来的第五章，我们反过来看——如果设计者在这套流程里犯了常见的错误，会是什么样子。
+本章可以总结为一句话：**先看业务要什么，再把能力归并成正交的 Tool，用原则校验，用场景验证，修缺口，再验证。** 这里的编排可以是实时规划、工作流、生成脚本或其他控制逻辑，不限定某一种实现形态。
 
 ---
 
 ## 五、反模式：Tool 设计的典型错误
 
-原则告诉人"要做什么"，反模式让设计者对照自查。下面 8 个错误，每一个都来自真实系统的血泪教训。
+原则告诉人"要做什么"，反模式方便对照自查。下面是 8 个常见错误。
 
 ---
 
@@ -736,7 +763,7 @@ def observe_and_report(target_id):
     return device.analyzer.detect(img)
 ```
 
-**为什么这是反模式**：状态机、资源互斥、操作时序、失败处理——全部甩给了 Agent。代码里没有一行处理"移动到一半设备没电了怎么办""sensor 正在被另一个任务占用怎么办"。Agent 调了这个函数，以为拿到了一个可靠的"观察"能力，实际上拿到的只是 4 个原子 API 的串联，每一步都可能炸。
+**为什么这是反模式**：状态机、资源互斥、操作时序、失败处理——全部甩给了 Agent。代码里没有处理"移动到一半设备没电了怎么办""sensor 正在被另一个任务占用怎么办"。Agent 以为拿到了一个可靠的"观察"能力，实际只是 4 个原子 API 的串联。
 
 **正确做法**：内部封装完整的生命周期——加锁、校验前置条件、处理中层失败、返回结构化结果。Agent 不需要知道内部调了几个 API。
 
@@ -745,17 +772,17 @@ def observe_and_report(target_id):
 ### 反模式 2：业务语义焊死在 Tool 里
 
 ```
-# 错误：把"VIP 用户优先处理"写死在 Tool 里
-def order_service.place(order):
-    if order.user.is_vip:
-        order.priority = "highest"
-        warehouse.notify_urgent(order)  # VIP 专有逻辑
+# 错误：把"学校门口目标优先处置"写死在目标识别 Tool 里
+def target_recognition.emit(target):
+    if target.area_type == "school_zone":
+        target.priority = "highest"
+        device.speaker.play("请立即驶离")  # 特定业务场景的处置逻辑
     # ...
 ```
 
-**为什么这是反模式**：明天运营策略从"VIP 优先"改成"新用户首单优先"，就得改 `OrderService`——一个被几十个场景依赖的核心 Tool。而且"VIP 优先"是业务策略，不是订单创建的内在逻辑。换一个业务系统（比如把订单系统卖给另一家公司），VIP 规则完全不同。
+**为什么这是反模式**：明天策略从"学校门口优先"改成"消防通道优先"，就得改 `TargetRecognition`。但这是业务策略，不是目标识别的内在逻辑。换一个巡检场景，优先级规则可能完全不同。
 
-**正确做法**：`OrderService.place(order)` 只负责创建订单。优先级判断在上层脚本或策略引擎里完成，脚本拿到结果后决定是否调 `warehouse.notify_urgent()`。 Tool 保持场景无关，策略保持可替换。
+**正确做法**：`TargetRecognition` 只负责提供目标事实和生命周期状态。优先级判断在上层编排逻辑、策略引擎或人工配置里完成，上层拿到结果后决定是否调用 `speaker_play()`、`flash_light()` 或只记录不上报。Tool 保持场景无关，策略保持可替换。（电商里类似：不要把"VIP 优先"写死在订单创建 Tool 里。）
 
 ---
 
@@ -766,15 +793,15 @@ def order_service.place(order):
 { "status": "failed", "message": "Something went wrong" }
 ```
 
-**为什么这是反模式**：同一个 `failed`，可能是库存不足（重试无用）、支付超时（可以重试）、地址不合法（需人工改）、风控拒绝（永久失败）。四种情况，Agent 的处理方式完全不同——但它只拿到了一个 `failed`，只能随机选一个处理策略。
+**为什么这是反模式**：同一个 `failed`，可能是安全区域越界、目标暂时丢失、观测模块忙、电量不足。处理方式完全不同，但 Agent 只拿到一个 `failed`，就只能猜。
 
 **正确做法**：每一条错误都要携带三个信息（详见原则 2）：
 
 ```json
-{ "status": "declined", "reason": "insufficient_funds",
+{ "status": "target_lost", "reason": "out_of_view_after_move",
   "recoverable": false,
-  "suggestion": "notify_user_to_change_payment_method",
-  "system_state": "idle" }
+  "suggestion": "mark_skip_and_resume_route",
+  "system_state": "route_paused" }
 ```
 
 ---
@@ -788,7 +815,7 @@ detector.mark_processed(target_id)  # 顺便把观测锁定也释放了
 # 返回 target_not_locked——Agent 懵了
 ```
 
-**为什么这是反模式**：Agent 编排时，脑子里的"系统状态"和真实系统状态产生了漂移。一次漂移 Agent 还能勉强兜底，连续几次漂移后 Agent 的后续判断全部基于错误假设——而且它不知道自己在错误的假设上运行。
+**为什么这是反模式**：Agent 编排时，脑子里的"系统状态"和真实系统状态产生了漂移。漂移多了，后续判断就会建立在错误假设上。
 
 **正确做法**：每个 Tool 的副作用必须在接口描述里显式声明。如果一个操作会释放资源锁、改变其他 Tool 的可用性、触发异步任务——写清楚。
 
@@ -803,7 +830,7 @@ router.move_to(target_A.position)   # Agent 假设锁住了，但真的锁住了
 recorder.capture()                  # 拍的时候可能锁已经丢了
 ```
 
-**为什么这是反模式**：Agent 变成了状态机的主体——而 Agent 是会幻觉的。它"以为自己锁定了"，不代表系统真的锁定了。它"以为上一步成功了"，不代表没有静默失败。
+**为什么这是反模式**：Agent 变成了状态机的主体。它"以为自己锁定了"，不代表系统真的锁定了。它"以为上一步成功了"，不代表没有静默失败。
 
 **正确做法**：Tool 自己管理状态。Agent 不记"刚才做了什么"——每次做决策前读 Tool 返回的状态。`detector.lock(target_A)` 返回的不只是 `ok`，还包括 `locked_target_id`、`locked_at`、`will_timeout_in_sec`，Agent 可以随时通过 `detector.status()` 获取真实状态，而不是靠自己的记忆。
 
@@ -859,11 +886,14 @@ if battery < 20 or link == "poor":
 
 做成查询 Tool 有两个问题：一是 Agent 必须在每个决策点手动写查询逻辑，遗漏一个就可能在低电量时继续执行危险操作；二是高频查询浪费上下文和带宽。
 
-**正确做法**：环境状态作为**只读旁路视图**存在。Agent 不需要查询——它在每次调用任何 Tool 时，Runtime 自动注入当前环境状态作为上下文。安全门层（原则 4）在环境状态越过阈值时直接拒绝操作，Agent 甚至不需要感知。
+**正确做法**：环境状态作为**只读、同步、瞬时的运行时视图**存在，与 Tool 平级但不触发动作。Agent 不需要 `await` 一个查询 Tool，而是在编排决策点直接读取 `system.field`。同时，安全门层或相关 Tool 仍然要在环境状态越过阈值时拒绝危险操作，不能只依赖 Agent 自己检查。
 
 ```
-# Agent 不需要写这段代码。Runtime 在每次 Tool 调用前自动校验。
-# 当 battery < 20% 时，移动类 Tool 调用会被安全门直接拒绝：
+# Agent / 上层编排逻辑可以直接读只读视图，不需要 await query Tool：
+if system.battery.pct < 20:
+    return_to_base()
+
+# 即使上层漏掉检查，移动类 Tool 也必须拒绝危险调用：
 { "status": "rejected", "reason": "low_power", "battery_pct": 18,
   "suggestion": "return_to_base" }
 ```
@@ -879,7 +909,7 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 **为什么这是反模式**：端侧小模型（4B-9B 参数）的能力边界是感知和分类——"这张图里有没有人""这个设备表面有没有可见裂缝"。它不是规划器，不是决策器，不是业务判断引擎。让它做"是否异常、是否上报、是否喊话"——这是在要求它理解业务上下文、权衡后果、做出价值判断。它做不到，但会给出一个"看起来合理"的答案。
 
-**正确做法**：端侧模型只做一件事——**输入感知数据，输出分类结果**。所有业务决策留在云端生成的脚本、人类的策略配置、或结构化规则引擎里。
+**正确做法**：端侧模型只做一件事——**输入感知数据，输出分类结果**。所有业务决策留给 Agent 的上层编排逻辑、人类策略配置、独立 inference 判断点或结构化规则引擎。
 
 ```
 端侧模型该做的：  classify(image) → "正常" / "异常" / "不确定"
@@ -892,20 +922,20 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 | # | 反模式 | 一句话诊断 | 对应原则 |
 |---|---|---|---|
-| 1 | 薄 Wrapper | Tool 内部没有状态机，Agent 被迫管理一切 | 元原则、原则 1 |
-| 2 | 业务语义焊死 | 换场景就要重写 Tool | 元原则 |
+| 1 | 薄 Wrapper | Tool 内部没有状态机，Agent 被迫管理一切 | 总原则、原则 1 |
+| 2 | 业务语义焊死 | 换场景就要重写 Tool | 总原则 |
 | 3 | 失败只返 String | Agent 拿到 `failed` 不知道下一步干嘛 | 原则 2 |
 | 4 | 隐式副作用 | Agent 脑子里的系统状态跟实际脱节 | 原则 2 |
 | 5 | Agent 帮 Tool 记状态 | Agent 靠记忆而非 Tool 返回值做判断 | 原则 1 |
 | 6 | 调用形态选错 | 长任务当同步、事件流当轮询 | 原则 2 |
 | 7 | 环境状态成查询 Tool | Agent 到处 await 电量/链路/负载 | 原则 3、原则 4 |
-| 8 | 小模型做大决策 | 端侧 4B 被要求判断"是否喊话" | 元原则 |
+| 8 | 小模型做大决策 | 端侧 4B 被要求判断"是否喊话" | 总原则 |
 
 ---
 
 ## 六、验证：怎么知道你的 Tool 设计对了
 
-漂亮的抽象如果跑不通真实工作流就是废的。以下 3 条是可操作的检验标准：
+抽象最终要回到真实工作流里验证。以下 3 条可以直接用来检查：
 
 ### 1. 端到端闭环测试
 
@@ -918,7 +948,7 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 ### 2. 场景切换测试
 
-换一个业务场景（比如从"标准巡检"换成"定点核查"），你的 Tool 要不要改？如果需要大改，说明 Tool 里有业务语义泄漏。如果只需要换上层脚本或新增少量 Tool，设计合格。
+换一个业务场景（比如从"标准巡检"换成"定点核查"），你的 Tool 要不要改？如果需要大改，说明 Tool 里有业务语义泄漏。如果只需要换上层编排逻辑或新增少量 Tool，设计合格。
 
 ### 3. 失败路径完备性
 
@@ -936,9 +966,9 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 > 一个高层 Tool 封装了 95% 的情况，剩下 5% Agent 需要降级到原子能力手动处理。但这个逃生口的权限和粒度怎么控制？
 
-每个高层 Tool 都可能遇到"设计时没考虑到的边界情况"——这时 Agent 被抽象层锁死了，无法降级到原子能力自己解决。一个好的设计应该留一个 escape hatch（逃生口）：当 Tool 返回 `out_of_scope` 时，Agent 可以 fallback 到原子操作手动处理。
+每个高层 Tool 都可能遇到"设计时没考虑到的边界情况"——这时 Agent 被抽象层锁死了，无法降级处理。一个好的设计应该留一个 escape hatch（逃生口）：当 Tool 返回 `out_of_scope` 时，Agent 可以请求一组受控、审计、限权的降级能力。
 
-这个 escape hatch 的粒度和权限控制还是开放问题——开太大等于回到路径 A（Agent 又可以直接调原子 API），开太小等于抽象陷阱。一个可能的方向是限时降级：Agent 获得 N 步原子操作权限来手动处理当前异常，完成后自动回到高层 Tool 的编排模式。
+这个 escape hatch 的粒度和权限控制还是开放问题——开太大等于回到路径 A（Agent 又可以直接调裸 API），开太小等于抽象陷阱。无论如何，它都不应该暴露底层 SDK 函数名、私有状态机、原始数据流标签或不受状态约束的原子操作。一个可能的方向是限时降级：Agent 获得 N 步受保护操作权限来处理当前异常，完成后自动回到高层 Tool 的编排模式。
 
 ---
 
@@ -946,19 +976,21 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 > 当前框架假设 Tool 内部只有确定性逻辑，判断留给 Agent。但如果端侧芯片够强，Tool 能不能内嵌一个"判断力"？
 
-比如 `ObjectDetector` 不只返回 `has_vehicle: true`，而是返回 `{ has_vehicle: true, suspicious: true, reason: "静止超过 10 分钟且位于非停车区域" }`。这个 `suspicious` 是在 Tool 内部完成的——它跨越了"感知"和"判断"的边界。
+比如 `TargetRecognition` 不只返回 `has_target: true`，而是返回 `{ has_target: true, suspicious: true, reason: "静止超过 10 分钟且位于某类业务区域" }`。这个 `suspicious` 是在 Tool 内部完成的——它跨越了"感知"和"判断"的边界。
 
 这会带来两个连锁问题：
-- **职责分界是否要重新划？** 元原则说"不确定性判断留给 Agent"。如果 Tool 内嵌判断模型，Agent 负担进一步降低——但 Tool 的可复用性也下降（换一个场景，"可疑"的定义完全不同）。
+- **职责分界是否要重新划？** 前面的总原则说"不确定性判断留给 Agent"。如果 Tool 内嵌判断模型，Agent 负担进一步降低——但 Tool 的可复用性也下降（换一个场景，"可疑"的定义完全不同）。
 - **判断的置信度如何传递？** Tool 返回 `suspicious: true`，但这个判断本身有置信度问题。Agent 要不要二次校验？如果无条件信任 Tool 的判断，等于把业务决策权下放到了设备端。如果每个判断都要 Agent 复核，那 Tool 内嵌判断的价值在哪？
+
+当前更保守的边界是：Tool 产出事实和可执行状态，业务判断放在 Agent 的上层编排逻辑、独立 inference 判断点或策略引擎里。Tool 是否能内嵌判断模型，是未来能力变强后才需要重新评估的问题。
 
 ---
 
 ### 3. 端侧模型足够强时，架构会反转吗？
 
-> 如果端侧能跑 GPT-4 级别的模型，"云端生成脚本→端侧执行"这条链路还需要吗？
+> 如果端侧能跑 GPT-4 级别的模型，"中心侧编排→端侧执行"这条链路还需要吗？
 
-当前架构的核心假设是：端侧算力有限，只能做感知，不能做规划。但如果这个前提不成立了——设备能不能直接接收高层意图（"去区域 A 看看有没有异常"），在端侧完成 Tool 编排、执行和异常处理？云端只负责下发任务目标和接收结果。
+当前架构的核心假设是：端侧算力有限，只能做感知，不能做规划。但如果这个前提不成立了——设备能不能直接接收高层意图（"去区域 A 看看有没有异常"），在端侧完成 Tool 编排、执行和异常处理？中心侧只负责下发任务目标和接收结果。
 
 好处是离线可用、延迟更低、不依赖链路。风险是端侧模型的可控性和可调试性远不如云端——如果在端侧编排出了一个危险的序列，谁负责叫停？安全门（原则 4）能不能兜住一个在端侧做实时规划的模型？
 
@@ -970,7 +1002,7 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 对于单设备系统（单巡检设备、单机器人），大多数操作天然是单例的——同一时刻只有一条路线在执行、一个目标在追踪。`route.pause()` 不需要 handle，因为 Agent 知道它在暂停哪个路线。短任务 + 事件流在这些场景下完全够用。
 
-但对于多实例系统（同时跑多个导出任务、多个订单等待骑手），handle 提供的同步控制反馈（"这个任务暂停成功了吗？"）无法被事件替代——等事件意味着回调地狱。**什么时候该用哪种，目前更多靠经验判断，缺少系统化的决策框架。**
+但对于多实例系统（同时跑多个导出任务、多个巡检子任务等待同一组设备资源），handle 提供的同步控制反馈（"这个任务暂停成功了吗？"）无法被事件替代——等事件意味着回调地狱。**什么时候该用哪种，目前更多靠经验判断，缺少系统化的决策框架。**
 
 ---
 
@@ -984,9 +1016,9 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 ### 6. 编排模型本身的进化
 
-> 确定性脚本用于固定流程没有问题。但如果流程本身需要动态调整——Agent 应该在哪个层面介入编排？
+> 确定性工作流用于固定流程没有问题。但如果流程本身需要动态调整——Agent 应该在哪个层面介入编排？
 
-当前我们假设 Agent 通过确定性脚本编排 Tool。但如果业务场景足够多变，确定性脚本可能不如 Agent 实时规划。"云端生成脚本" vs "Agent 实时规划"未必是二选一——可能是分层混合：常规流程用预定义脚本跑主流程，分叉点时让 LLM 做子目标规划。但这个分叉点放在哪里、LLM 介入的频率多高——目前没有定论。
+Agent 可以用多种方式编排 Tool：实时规划、预定义工作流、生成脚本、策略引擎，或这些方式的混合。如果业务场景足够多变，确定性工作流可能不如 Agent 实时规划；但固定主流程仍然适合用工作流承载。"中心侧生成控制逻辑" vs "Agent 实时规划"未必是二选一——可能是分层混合：常规流程用预定义工作流跑主流程，分叉点时让 LLM 做子目标规划。但这个分叉点放在哪里、LLM 介入的频率多高——目前没有定论。
 
 ---
 
@@ -1000,13 +1032,13 @@ edge_llm.judge("这个场景是否异常？是否需要上报？是否需要喊�
 
 ## 总结
 
-这篇文章的核心论点是：
+这篇文章的主要观点是：
 
-> **当一个复杂系统要向 AI Agent 开放能力时，不应该把原子 API 文档丢给 AI 让它自己编排，也不应该把所有流程写成死工作流。正确的方式是设计一套高阶、有状态的 Tool，让 Agent 在 Tool 的能力边界内自由编排，而 Tool 内部封装状态机、安全门、信息压缩和资源互斥。**
+> **当一个复杂系统要向 AI Agent 开放能力时，不应该把原子 API 文档丢给 AI 让它自己编排，也不应该把所有流程写成死工作流。正确的方式是设计一套高阶、有状态的 Tool，让 Agent 在 Tool 的能力边界内自由编排，而 Tool 或系统边界封装状态机、安全门、信息压缩和资源互斥。**
 
-各章节的实操输出：
+可以落地成三件事：
 
-1. **1 条元原则 + 4 条设计原则**——职责分界（元原则）、状态优先、可预测接口、信息压缩、安全第一
+1. **1 条总原则 + 4 条设计原则**——职责分界、状态优先、可预测接口、信息压缩、安全第一
 2. **从业务到 Tool 的设计方法**——场景能力分解→能力归并成正交 Tool→扩展性检验→原则校验→场景覆盖验证
 3. **8 个反模式**——薄 Wrapper、业务语义焊死、失败只返 String、隐式副作用、Agent 记状态、调用形态选错、环境状态成查询 Tool、小模型做大决策
 
